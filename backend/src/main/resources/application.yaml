@@ -21,4 +21,6 @@ spring:
 
 logging:
   level:
-    org.flywaydb: INFO
+    org-flywaydb: INFO
+
+    

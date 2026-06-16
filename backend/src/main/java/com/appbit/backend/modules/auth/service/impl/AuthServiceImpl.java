@@ -9,6 +9,7 @@ import org.springframework.transaction.annotation.Transactional;
 import com.appbit.backend.modules.auth.dto.RegisterRequest;
 import com.appbit.backend.modules.auth.dto.RegisterResponse;
 import com.appbit.backend.modules.auth.exception.EmailAlreadyExistsException;
+import com.appbit.backend.modules.auth.mapper.UserMapper;
 import com.appbit.backend.modules.auth.service.AuthService;
 import com.appbit.backend.modules.user.EnumRole;
 import com.appbit.backend.modules.user.UserEntity;
@@ -31,21 +32,13 @@ public class AuthServiceImpl implements AuthService {
             throw new EmailAlreadyExistsException(request.getEmail());
         }
 
-        UserEntity user = UserEntity.builder()
-                .fullName(request.getFullName())
-                .email(request.getEmail())
-                .password(passwordEncoder.encode(request.getPassword()))
-                .role(EnumRole.GESTOR_PUBLICO) //rol de usuario provisorio
-                .createdAt(LocalDateTime.now())
-                .build();
+        UserEntity user = UserMapper.toEntity(request);
+        user.setPassword(passwordEncoder.encode(user.getPassword()));
+        user.setRole(EnumRole.GESTOR_PUBLICO); //rol por defecto provisorio
 
         UserEntity savedUser = userRepository.save(user);
 
-        return RegisterResponse.builder()
-                .id(savedUser.getId())
-                .email(savedUser.getEmail())
-                .role(savedUser.getRole().name())
-                .build();
+        return UserMapper.toRegisterResponse(savedUser);
     }
 
 }

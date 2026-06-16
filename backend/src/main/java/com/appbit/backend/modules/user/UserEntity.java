@@ -2,16 +2,17 @@ package com.appbit.backend.modules.user;
 
 import java.time.LocalDateTime;
 
+import org.springframework.data.annotation.CreatedDate;
+import org.springframework.data.jpa.domain.support.AuditingEntityListener;
+
 import jakarta.persistence.*;
 import lombok.*;
 
 @Entity
 @Table(name = "users")
-@Getter
-@Setter
-@NoArgsConstructor
-@AllArgsConstructor
+@Data
 @Builder
+@EntityListeners(AuditingEntityListener.class)
 public class UserEntity {
 
     @Id
@@ -31,6 +32,7 @@ public class UserEntity {
     @Column(nullable = false)
     private EnumRole role;
 
+    @CreatedDate
     @Column(name = "created_at", nullable = false)
     private LocalDateTime createdAt;
 }
