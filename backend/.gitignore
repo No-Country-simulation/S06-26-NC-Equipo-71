@@ -35,3 +35,8 @@ build/
 
 ### Local environment ###
 .env
+
+
+## DATA ##
+
+/data

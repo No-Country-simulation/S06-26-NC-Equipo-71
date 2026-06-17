@@ -1,0 +1,11 @@
+FROM python:3.13-slim
+
+WORKDIR /app
+
+COPY scripts/visent/requirements.txt /app/scripts/visent/requirements.txt
+
+RUN pip install --no-cache-dir -r /app/scripts/visent/requirements.txt
+
+COPY scripts/visent /app/scripts/visent
+
+CMD ["python", "scripts/visent/visent_loader.py"]
