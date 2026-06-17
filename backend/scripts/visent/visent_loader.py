@@ -4,7 +4,7 @@ from pathlib import Path
 import pandas as pd
 from sqlalchemy import create_engine, text
 
-from normalize_names import normalize_cluster, normalize_municipality
+from normalize_names import normalize_cluster, normalize_municipality, normalize_code
 
 
 DATA_DIR = Path(os.getenv("VISENT_DATA_DIR", "/app/data/visent"))
@@ -57,7 +57,7 @@ CLUSTERS = [
 
 def build_engine():
     url = f"postgresql+psycopg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-    return create_engine(url)
+    return create_engine(url, pool_pre_ping=True)
 
 
 def csv_path(file_name: str) -> Path:
@@ -87,11 +87,47 @@ def to_bool_01(value):
     return str(value).strip() == "1"
 
 
-def normalize_period(value):
+def normalize_identifier(value):
     if pd.isna(value):
         return None
 
-    return str(value).strip().upper()
+    value = str(value).strip()
+
+    if value == "" or value.lower() == "nan":
+        return None
+
+    return value
+
+
+PERIOD_ALIASES = {
+    "MADRUGADA": "MADRUGADA",
+    "DAWN": "MADRUGADA",
+    "EARLY_MORNING": "MADRUGADA",
+
+    "MANHA": "MANHA",
+    "MANANA": "MANHA",
+    "MORNING": "MANHA",
+
+    "TARDE": "TARDE",
+    "AFTERNOON": "TARDE",
+
+    "NOITE": "NOITE",
+    "NIGHT": "NOITE",
+}
+
+
+def normalize_period(value):
+    period = normalize_code(value)
+
+    if period is None:
+        return None
+
+    normalized = PERIOD_ALIASES.get(period)
+
+    if normalized is None:
+        raise ValueError(f"Periodo inválido: {value} -> {period}")
+
+    return normalized
 
 
 def insert_municipalities(connection):
@@ -192,7 +228,7 @@ def get_subscriber_ids(connection):
         text("SELECT id, assinante_hash FROM subscribers")
     )
 
-    return {row.assinante_hash: row.id for row in result}
+    return {normalize_identifier(row.assinante_hash): row.id for row in result}
 
 
 def load_antennas(connection):
@@ -270,7 +306,7 @@ def load_subscribers(connection):
 
         for _, row in chunk.iterrows():
             rows.append({
-                "assinante_hash": to_int(row["assinante_hash"]),
+                "assinante_hash": normalize_identifier(row["assinante_hash"]),
                 "home_cluster_id": int(row["home_cluster_id"]),
                 "income_cluster": str(row["income_cluster"]).strip().upper(),
                 "age_group": str(row["age_group"]).strip(),
@@ -651,13 +687,69 @@ def truncate_sequence_visits(connection):
     print("sequence_visits limpiada")
 
 
-def load_mobility_records(connection, max_rows: int | None):
+def load_mobility_records(engine, max_rows: int | None):
     path = csv_path("tensor_mobilidade.csv")
 
-    subscriber_ids = get_subscriber_ids(connection)
-    antenna_ids = get_antenna_ids(connection)
+    with engine.connect() as connection:
+        subscriber_ids = get_subscriber_ids(connection)
+        antenna_ids = get_antenna_ids(connection)
 
     total_rows = 0
+
+    insert_sql = text("""
+        INSERT INTO mobility_records (
+            subscriber_id,
+            antenna_id,
+            day_date,
+            content_type,
+            network_type,
+            session_period,
+            sessions_count,
+            total_duration_seconds,
+            download_bytes,
+            upload_bytes,
+            drop_pct,
+            congestion_level,
+            calls_count,
+            voice_seconds,
+            voice_completion_rate,
+            voice_congestion,
+            messages_count,
+            sms_completion_rate,
+            sms_congestion,
+            streaming_sessions,
+            game_sessions,
+            social_sessions,
+            communication_sessions,
+            other_sessions
+        )
+        VALUES (
+            :subscriber_id,
+            :antenna_id,
+            :day_date,
+            :content_type,
+            :network_type,
+            :session_period,
+            :sessions_count,
+            :total_duration_seconds,
+            :download_bytes,
+            :upload_bytes,
+            :drop_pct,
+            :congestion_level,
+            :calls_count,
+            :voice_seconds,
+            :voice_completion_rate,
+            :voice_congestion,
+            :messages_count,
+            :sms_completion_rate,
+            :sms_congestion,
+            :streaming_sessions,
+            :game_sessions,
+            :social_sessions,
+            :communication_sessions,
+            :other_sessions
+        )
+    """)
 
     for chunk in pd.read_csv(
         path,
@@ -675,14 +767,14 @@ def load_mobility_records(connection, max_rows: int | None):
         if chunk.empty:
             break
 
-        chunk["assinante_hash_int"] = chunk["assinante_hash"].map(to_int)
+        chunk["assinante_hash_key"] = chunk["assinante_hash"].map(normalize_identifier)
         chunk["ecgi"] = chunk["ecgi"].astype(str).str.strip()
 
-        chunk["subscriber_id"] = chunk["assinante_hash_int"].map(subscriber_ids)
+        chunk["subscriber_id"] = chunk["assinante_hash_key"].map(subscriber_ids)
         chunk["antenna_id"] = chunk["ecgi"].map(antenna_ids)
 
         missing_subscribers = (
-            chunk[chunk["subscriber_id"].isna()]["assinante_hash"]
+            chunk[chunk["subscriber_id"].isna()]["assinante_hash_key"]
             .drop_duplicates()
             .head(20)
             .tolist()
@@ -703,92 +795,37 @@ def load_mobility_records(connection, max_rows: int | None):
 
         rows = []
 
-        for _, row in chunk.iterrows():
+        for row in chunk.itertuples(index=False):
             rows.append({
-                "subscriber_id": int(row["subscriber_id"]),
-                "antenna_id": int(row["antenna_id"]),
-                "day_date": row["day_date"],
-                "content_type": str(row["rg_type"]).strip().upper(),
-                "network_type": str(row["rat_type"]).strip().upper(),
-                "session_period": normalize_period(row["periodo_sessao"]),
-                "sessions_count": to_int(row["n_sessoes"]),
-                "total_duration_seconds": to_int(row["dur_total_s"]),
-                "download_bytes": to_float(row["download_bytes"]),
-                "upload_bytes": to_float(row["upload_bytes"]),
-                "drop_pct": to_float(row["drop_pct"]),
-                "congestion_level": to_float(row["congestionamento"]),
-                "calls_count": to_int(row["chamadas"]),
-                "voice_seconds": to_int(row["conversacao_seg"]),
-                "voice_completion_rate": to_float(row["completamento_voz"]),
-                "voice_congestion": to_float(row["cong_voz"]),
-                "messages_count": to_int(row["mensagens"]),
-                "sms_completion_rate": to_float(row["completamento_sms"]),
-                "sms_congestion": to_float(row["cong_sms"]),
-                "streaming_sessions": to_int(row["rg_streaming"]),
-                "game_sessions": to_int(row["rg_game"]),
-                "social_sessions": to_int(row["rg_social"]),
-                "communication_sessions": to_int(row["rg_comunicacao"]),
-                "other_sessions": to_int(row["rg_outros"]),
+                "subscriber_id": int(row.subscriber_id),
+                "antenna_id": int(row.antenna_id),
+                "day_date": row.day_date,
+                "content_type": str(row.rg_type).strip().upper(),
+                "network_type": str(row.rat_type).strip().upper(),
+                "session_period": normalize_period(row.periodo_sessao),
+                "sessions_count": to_int(row.n_sessoes),
+                "total_duration_seconds": to_int(row.dur_total_s),
+                "download_bytes": to_float(row.download_bytes),
+                "upload_bytes": to_float(row.upload_bytes),
+                "drop_pct": to_float(row.drop_pct),
+                "congestion_level": to_float(row.congestionamento),
+                "calls_count": to_int(row.chamadas),
+                "voice_seconds": to_int(row.conversacao_seg),
+                "voice_completion_rate": to_float(row.completamento_voz),
+                "voice_congestion": to_float(row.cong_voz),
+                "messages_count": to_int(row.mensagens),
+                "sms_completion_rate": to_float(row.completamento_sms),
+                "sms_congestion": to_float(row.cong_sms),
+                "streaming_sessions": to_int(row.rg_streaming),
+                "game_sessions": to_int(row.rg_game),
+                "social_sessions": to_int(row.rg_social),
+                "communication_sessions": to_int(row.rg_comunicacao),
+                "other_sessions": to_int(row.rg_outros),
             })
 
         if rows:
-            connection.execute(
-                text("""
-                    INSERT INTO mobility_records (
-                        subscriber_id,
-                        antenna_id,
-                        day_date,
-                        content_type,
-                        network_type,
-                        session_period,
-                        sessions_count,
-                        total_duration_seconds,
-                        download_bytes,
-                        upload_bytes,
-                        drop_pct,
-                        congestion_level,
-                        calls_count,
-                        voice_seconds,
-                        voice_completion_rate,
-                        voice_congestion,
-                        messages_count,
-                        sms_completion_rate,
-                        sms_congestion,
-                        streaming_sessions,
-                        game_sessions,
-                        social_sessions,
-                        communication_sessions,
-                        other_sessions
-                    )
-                    VALUES (
-                        :subscriber_id,
-                        :antenna_id,
-                        :day_date,
-                        :content_type,
-                        :network_type,
-                        :session_period,
-                        :sessions_count,
-                        :total_duration_seconds,
-                        :download_bytes,
-                        :upload_bytes,
-                        :drop_pct,
-                        :congestion_level,
-                        :calls_count,
-                        :voice_seconds,
-                        :voice_completion_rate,
-                        :voice_congestion,
-                        :messages_count,
-                        :sms_completion_rate,
-                        :sms_congestion,
-                        :streaming_sessions,
-                        :game_sessions,
-                        :social_sessions,
-                        :communication_sessions,
-                        :other_sessions
-                    )
-                """),
-                rows,
-            )
+            with engine.begin() as connection:
+                connection.execute(insert_sql, rows)
 
         total_rows += len(rows)
         print(f"mobility_records parcial: {total_rows}")
@@ -796,13 +833,39 @@ def load_mobility_records(connection, max_rows: int | None):
     print(f"mobility_records cargados: {total_rows}")
 
 
-def load_sequence_visits(connection, max_rows: int | None):
+def load_sequence_visits(engine, max_rows: int | None):
     path = csv_path("tensor_sequencias.csv")
 
-    subscriber_ids = get_subscriber_ids(connection)
-    antenna_ids = get_antenna_ids(connection)
+    with engine.connect() as connection:
+        subscriber_ids = get_subscriber_ids(connection)
+        antenna_ids = get_antenna_ids(connection)
 
     total_rows = 0
+
+    insert_sql = text("""
+        INSERT INTO sequence_visits (
+            subscriber_id,
+            antenna_id,
+            day_date,
+            sequence_number,
+            arrival_time,
+            stay_seconds,
+            session_period,
+            distance_km_from_previous,
+            sessions_count
+        )
+        VALUES (
+            :subscriber_id,
+            :antenna_id,
+            :day_date,
+            :sequence_number,
+            :arrival_time,
+            :stay_seconds,
+            :session_period,
+            :distance_km_from_previous,
+            :sessions_count
+        )
+    """)
 
     for chunk in pd.read_csv(
         path,
@@ -820,14 +883,14 @@ def load_sequence_visits(connection, max_rows: int | None):
         if chunk.empty:
             break
 
-        chunk["assinante_hash_int"] = chunk["assinante_hash"].map(to_int)
+        chunk["assinante_hash_key"] = chunk["assinante_hash"].map(normalize_identifier)
         chunk["ecgi"] = chunk["ecgi"].astype(str).str.strip()
 
-        chunk["subscriber_id"] = chunk["assinante_hash_int"].map(subscriber_ids)
+        chunk["subscriber_id"] = chunk["assinante_hash_key"].map(subscriber_ids)
         chunk["antenna_id"] = chunk["ecgi"].map(antenna_ids)
 
         missing_subscribers = (
-            chunk[chunk["subscriber_id"].isna()]["assinante_hash"]
+            chunk[chunk["subscriber_id"].isna()]["assinante_hash_key"]
             .drop_duplicates()
             .head(20)
             .tolist()
@@ -846,49 +909,29 @@ def load_sequence_visits(connection, max_rows: int | None):
                 f"Subscribers: {missing_subscribers}, Antennas: {missing_antennas}"
             )
 
+        chunk["arrival_time"] = pd.to_datetime(
+            chunk["arrival_time"],
+            errors="raise",
+        )
+
         rows = []
 
-        for _, row in chunk.iterrows():
+        for row in chunk.itertuples(index=False):
             rows.append({
-                "subscriber_id": int(row["subscriber_id"]),
-                "antenna_id": int(row["antenna_id"]),
-                "day_date": row["day_date"],
-                "sequence_number": to_int(row["seq_num"]),
-                "arrival_time": row["arrival_time"],
-                "stay_seconds": to_int(row["permanencia_seg"]),
-                "session_period": normalize_period(row["periodo_sessao"]),
-                "distance_km_from_previous": to_float(row["distancia_km_anterior"]),
-                "sessions_count": to_int(row["n_sessoes"]),
+                "subscriber_id": int(row.subscriber_id),
+                "antenna_id": int(row.antenna_id),
+                "day_date": row.day_date,
+                "sequence_number": to_int(row.seq_num),
+                "arrival_time": row.arrival_time.to_pydatetime(),
+                "stay_seconds": to_int(row.permanencia_seg),
+                "session_period": normalize_period(row.periodo_sessao),
+                "distance_km_from_previous": to_float(row.distancia_km_anterior),
+                "sessions_count": to_int(row.n_sessoes),
             })
 
         if rows:
-            connection.execute(
-                text("""
-                    INSERT INTO sequence_visits (
-                        subscriber_id,
-                        antenna_id,
-                        day_date,
-                        sequence_number,
-                        arrival_time,
-                        stay_seconds,
-                        session_period,
-                        distance_km_from_previous,
-                        sessions_count
-                    )
-                    VALUES (
-                        :subscriber_id,
-                        :antenna_id,
-                        :day_date,
-                        :sequence_number,
-                        :arrival_time,
-                        :stay_seconds,
-                        :session_period,
-                        :distance_km_from_previous,
-                        :sessions_count
-                    )
-                """),
-                rows,
-            )
+            with engine.begin() as connection:
+                connection.execute(insert_sql, rows)
 
         total_rows += len(rows)
         print(f"sequence_visits parcial: {total_rows}")
@@ -944,21 +987,23 @@ def main():
     if LOAD_MOBILITY:
         with engine.begin() as conn:
             truncate_mobility_records(conn)
-            max_rows = None if MAX_MOBILITY_ROWS <= 0 else MAX_MOBILITY_ROWS
-            load_mobility_records(conn, max_rows)
+
+        max_rows = None if MAX_MOBILITY_ROWS <= 0 else MAX_MOBILITY_ROWS
+        load_mobility_records(engine, max_rows)
         print("✅ mobility_records cargado")
     else:
         print("mobility_records omitido. Activar con LOAD_MOBILITY=true")
 
 
-    #las tablas grandes se pueden cargar en docker completas o una cierta cantidad de fila si queremos
+    #las tablas grandes se pueden cargar completas o con límite de filas para desarrollo local
 
     #sequences (opcional, grande)
     if LOAD_SEQUENCES:
         with engine.begin() as conn:
             truncate_sequence_visits(conn)
-            max_rows = None if MAX_SEQUENCE_ROWS <= 0 else MAX_SEQUENCE_ROWS
-            load_sequence_visits(conn, max_rows)
+
+        max_rows = None if MAX_SEQUENCE_ROWS <= 0 else MAX_SEQUENCE_ROWS
+        load_sequence_visits(engine, max_rows)
         print("✅ sequence_visits cargado")
     else:
         print("sequence_visits omitido. Activar con LOAD_SEQUENCES=true")

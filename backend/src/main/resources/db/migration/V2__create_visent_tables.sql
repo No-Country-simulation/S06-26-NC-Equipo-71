@@ -31,7 +31,7 @@ CREATE TABLE antennas (
 
 CREATE TABLE subscribers (
                              id BIGSERIAL PRIMARY KEY,
-                             assinante_hash INTEGER NOT NULL UNIQUE,
+                             assinante_hash VARCHAR(64) NOT NULL UNIQUE,
                              home_cluster_id BIGINT NOT NULL,
                              income_cluster CHAR(1) NOT NULL,
                              age_group VARCHAR(10) NOT NULL,
