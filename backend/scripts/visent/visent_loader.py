@@ -17,6 +17,12 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "postgres")
 
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "50000"))
 
+LOAD_MOBILITY = os.getenv("LOAD_MOBILITY", "false").lower() == "true"
+LOAD_SEQUENCES = os.getenv("LOAD_SEQUENCES", "false").lower() == "true"
+
+MAX_MOBILITY_ROWS = int(os.getenv("MAX_MOBILITY_ROWS", "100000"))
+MAX_SEQUENCE_ROWS = int(os.getenv("MAX_SEQUENCE_ROWS", "100000"))
+
 
 CLUSTERS = [
     {"code": "CBD_BEIRAMAR", "municipality": "Florianópolis", "lat": -27.5954, "lon": -48.5480, "profile": "Centro corporativo"},
@@ -179,6 +185,14 @@ def get_antenna_ids(connection):
     )
 
     return {row.ecgi: row.id for row in result}
+
+
+def get_subscriber_ids(connection):
+    result = connection.execute(
+        text("SELECT id, assinante_hash FROM subscribers")
+    )
+
+    return {row.assinante_hash: row.id for row in result}
 
 
 def load_antennas(connection):
@@ -620,6 +634,268 @@ def load_travel_time_stats(connection):
     print(f"travel_time_stats cargados: {total_rows}")
 
 
+
+def truncate_mobility_records(connection):
+    connection.execute(
+        text("TRUNCATE TABLE mobility_records RESTART IDENTITY")
+    )
+
+    print("mobility_records limpiada")
+
+
+def truncate_sequence_visits(connection):
+    connection.execute(
+        text("TRUNCATE TABLE sequence_visits RESTART IDENTITY")
+    )
+
+    print("sequence_visits limpiada")
+
+
+def load_mobility_records(connection, max_rows: int | None):
+    path = csv_path("tensor_mobilidade.csv")
+
+    subscriber_ids = get_subscriber_ids(connection)
+    antenna_ids = get_antenna_ids(connection)
+
+    total_rows = 0
+
+    for chunk in pd.read_csv(
+        path,
+        dtype={"assinante_hash": str, "ecgi": str},
+        chunksize=CHUNK_SIZE,
+        encoding="utf-8",
+    ):
+        if max_rows is not None and total_rows >= max_rows:
+            break
+
+        if max_rows is not None:
+            remaining = max_rows - total_rows
+            chunk = chunk.head(remaining)
+
+        if chunk.empty:
+            break
+
+        chunk["assinante_hash_int"] = chunk["assinante_hash"].map(to_int)
+        chunk["ecgi"] = chunk["ecgi"].astype(str).str.strip()
+
+        chunk["subscriber_id"] = chunk["assinante_hash_int"].map(subscriber_ids)
+        chunk["antenna_id"] = chunk["ecgi"].map(antenna_ids)
+
+        missing_subscribers = (
+            chunk[chunk["subscriber_id"].isna()]["assinante_hash"]
+            .drop_duplicates()
+            .head(20)
+            .tolist()
+        )
+
+        missing_antennas = (
+            chunk[chunk["antenna_id"].isna()]["ecgi"]
+            .drop_duplicates()
+            .head(20)
+            .tolist()
+        )
+
+        if missing_subscribers or missing_antennas:
+            raise ValueError(
+                "Faltan relaciones en mobility_records. "
+                f"Subscribers: {missing_subscribers}, Antennas: {missing_antennas}"
+            )
+
+        rows = []
+
+        for _, row in chunk.iterrows():
+            rows.append({
+                "subscriber_id": int(row["subscriber_id"]),
+                "antenna_id": int(row["antenna_id"]),
+                "day_date": row["day_date"],
+                "content_type": str(row["rg_type"]).strip().upper(),
+                "network_type": str(row["rat_type"]).strip().upper(),
+                "session_period": normalize_period(row["periodo_sessao"]),
+                "sessions_count": to_int(row["n_sessoes"]),
+                "total_duration_seconds": to_int(row["dur_total_s"]),
+                "download_bytes": to_float(row["download_bytes"]),
+                "upload_bytes": to_float(row["upload_bytes"]),
+                "drop_pct": to_float(row["drop_pct"]),
+                "congestion_level": to_float(row["congestionamento"]),
+                "calls_count": to_int(row["chamadas"]),
+                "voice_seconds": to_int(row["conversacao_seg"]),
+                "voice_completion_rate": to_float(row["completamento_voz"]),
+                "voice_congestion": to_float(row["cong_voz"]),
+                "messages_count": to_int(row["mensagens"]),
+                "sms_completion_rate": to_float(row["completamento_sms"]),
+                "sms_congestion": to_float(row["cong_sms"]),
+                "streaming_sessions": to_int(row["rg_streaming"]),
+                "game_sessions": to_int(row["rg_game"]),
+                "social_sessions": to_int(row["rg_social"]),
+                "communication_sessions": to_int(row["rg_comunicacao"]),
+                "other_sessions": to_int(row["rg_outros"]),
+            })
+
+        if rows:
+            connection.execute(
+                text("""
+                    INSERT INTO mobility_records (
+                        subscriber_id,
+                        antenna_id,
+                        day_date,
+                        content_type,
+                        network_type,
+                        session_period,
+                        sessions_count,
+                        total_duration_seconds,
+                        download_bytes,
+                        upload_bytes,
+                        drop_pct,
+                        congestion_level,
+                        calls_count,
+                        voice_seconds,
+                        voice_completion_rate,
+                        voice_congestion,
+                        messages_count,
+                        sms_completion_rate,
+                        sms_congestion,
+                        streaming_sessions,
+                        game_sessions,
+                        social_sessions,
+                        communication_sessions,
+                        other_sessions
+                    )
+                    VALUES (
+                        :subscriber_id,
+                        :antenna_id,
+                        :day_date,
+                        :content_type,
+                        :network_type,
+                        :session_period,
+                        :sessions_count,
+                        :total_duration_seconds,
+                        :download_bytes,
+                        :upload_bytes,
+                        :drop_pct,
+                        :congestion_level,
+                        :calls_count,
+                        :voice_seconds,
+                        :voice_completion_rate,
+                        :voice_congestion,
+                        :messages_count,
+                        :sms_completion_rate,
+                        :sms_congestion,
+                        :streaming_sessions,
+                        :game_sessions,
+                        :social_sessions,
+                        :communication_sessions,
+                        :other_sessions
+                    )
+                """),
+                rows,
+            )
+
+        total_rows += len(rows)
+        print(f"mobility_records parcial: {total_rows}")
+
+    print(f"mobility_records cargados: {total_rows}")
+
+
+def load_sequence_visits(connection, max_rows: int | None):
+    path = csv_path("tensor_sequencias.csv")
+
+    subscriber_ids = get_subscriber_ids(connection)
+    antenna_ids = get_antenna_ids(connection)
+
+    total_rows = 0
+
+    for chunk in pd.read_csv(
+        path,
+        dtype={"assinante_hash": str, "ecgi": str},
+        chunksize=CHUNK_SIZE,
+        encoding="utf-8",
+    ):
+        if max_rows is not None and total_rows >= max_rows:
+            break
+
+        if max_rows is not None:
+            remaining = max_rows - total_rows
+            chunk = chunk.head(remaining)
+
+        if chunk.empty:
+            break
+
+        chunk["assinante_hash_int"] = chunk["assinante_hash"].map(to_int)
+        chunk["ecgi"] = chunk["ecgi"].astype(str).str.strip()
+
+        chunk["subscriber_id"] = chunk["assinante_hash_int"].map(subscriber_ids)
+        chunk["antenna_id"] = chunk["ecgi"].map(antenna_ids)
+
+        missing_subscribers = (
+            chunk[chunk["subscriber_id"].isna()]["assinante_hash"]
+            .drop_duplicates()
+            .head(20)
+            .tolist()
+        )
+
+        missing_antennas = (
+            chunk[chunk["antenna_id"].isna()]["ecgi"]
+            .drop_duplicates()
+            .head(20)
+            .tolist()
+        )
+
+        if missing_subscribers or missing_antennas:
+            raise ValueError(
+                "Faltan relaciones en sequence_visits. "
+                f"Subscribers: {missing_subscribers}, Antennas: {missing_antennas}"
+            )
+
+        rows = []
+
+        for _, row in chunk.iterrows():
+            rows.append({
+                "subscriber_id": int(row["subscriber_id"]),
+                "antenna_id": int(row["antenna_id"]),
+                "day_date": row["day_date"],
+                "sequence_number": to_int(row["seq_num"]),
+                "arrival_time": row["arrival_time"],
+                "stay_seconds": to_int(row["permanencia_seg"]),
+                "session_period": normalize_period(row["periodo_sessao"]),
+                "distance_km_from_previous": to_float(row["distancia_km_anterior"]),
+                "sessions_count": to_int(row["n_sessoes"]),
+            })
+
+        if rows:
+            connection.execute(
+                text("""
+                    INSERT INTO sequence_visits (
+                        subscriber_id,
+                        antenna_id,
+                        day_date,
+                        sequence_number,
+                        arrival_time,
+                        stay_seconds,
+                        session_period,
+                        distance_km_from_previous,
+                        sessions_count
+                    )
+                    VALUES (
+                        :subscriber_id,
+                        :antenna_id,
+                        :day_date,
+                        :sequence_number,
+                        :arrival_time,
+                        :stay_seconds,
+                        :session_period,
+                        :distance_km_from_previous,
+                        :sessions_count
+                    )
+                """),
+                rows,
+            )
+
+        total_rows += len(rows)
+        print(f"sequence_visits parcial: {total_rows}")
+
+    print(f"sequence_visits cargados: {total_rows}")
+
+
 def print_counts(connection):
     tables = [
         "municipalities",
@@ -630,6 +906,8 @@ def print_counts(connection):
         "cluster_od_flows",
         "antenna_flows",
         "travel_time_stats",
+        "mobility_records",
+        "sequence_visits",
     ]
 
     print("\nResumen:")
@@ -657,6 +935,20 @@ def main():
         load_cluster_od_flows(connection)
         load_antenna_flows(connection)
         load_travel_time_stats(connection)
+
+        if LOAD_MOBILITY:
+            truncate_mobility_records(connection)
+            max_rows = None if MAX_MOBILITY_ROWS <= 0 else MAX_MOBILITY_ROWS
+            load_mobility_records(connection, max_rows)
+        else:
+            print("mobility_records omitido. Activar con LOAD_MOBILITY=true")
+
+        if LOAD_SEQUENCES:
+            truncate_sequence_visits(connection)
+            max_rows = None if MAX_SEQUENCE_ROWS <= 0 else MAX_SEQUENCE_ROWS
+            load_sequence_visits(connection, max_rows)
+        else:
+            print("sequence_visits omitido. Activar con LOAD_SEQUENCES=true")
 
         print_counts(connection)
 
