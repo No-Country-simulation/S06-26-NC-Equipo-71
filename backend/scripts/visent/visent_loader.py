@@ -923,34 +923,49 @@ def print_counts(connection):
 def main():
     engine = build_engine()
 
-    with engine.begin() as connection:
-        insert_municipalities(connection)
-        insert_clusters(connection)
-        load_antennas(connection)
-        load_subscribers(connection)
+    #tablas de referencia (idempotente, rápido)
+    with engine.begin() as conn:
+        insert_municipalities(conn)
+        insert_clusters(conn)
+        load_antennas(conn)
+        load_subscribers(conn)
+        print("✅ dimensiones cargadas")
 
-        truncate_fact_tables(connection)
+    #tensores pequeños
+    with engine.begin() as conn:
+        truncate_fact_tables(conn)
+        load_concentration_records(conn)
+        load_cluster_od_flows(conn)
+        load_antenna_flows(conn)
+        load_travel_time_stats(conn)
+        print("✅ tensores cargados")
 
-        load_concentration_records(connection)
-        load_cluster_od_flows(connection)
-        load_antenna_flows(connection)
-        load_travel_time_stats(connection)
-
-        if LOAD_MOBILITY:
-            truncate_mobility_records(connection)
+    #mobility (opcional, grande)
+    if LOAD_MOBILITY:
+        with engine.begin() as conn:
+            truncate_mobility_records(conn)
             max_rows = None if MAX_MOBILITY_ROWS <= 0 else MAX_MOBILITY_ROWS
-            load_mobility_records(connection, max_rows)
-        else:
-            print("mobility_records omitido. Activar con LOAD_MOBILITY=true")
+            load_mobility_records(conn, max_rows)
+        print("✅ mobility_records cargado")
+    else:
+        print("mobility_records omitido. Activar con LOAD_MOBILITY=true")
 
-        if LOAD_SEQUENCES:
-            truncate_sequence_visits(connection)
+
+    #las tablas grandes se pueden cargar en docker completas o una cierta cantidad de fila si queremos
+
+    #sequences (opcional, grande)
+    if LOAD_SEQUENCES:
+        with engine.begin() as conn:
+            truncate_sequence_visits(conn)
             max_rows = None if MAX_SEQUENCE_ROWS <= 0 else MAX_SEQUENCE_ROWS
-            load_sequence_visits(connection, max_rows)
-        else:
-            print("sequence_visits omitido. Activar con LOAD_SEQUENCES=true")
+            load_sequence_visits(conn, max_rows)
+        print("✅ sequence_visits cargado")
+    else:
+        print("sequence_visits omitido. Activar con LOAD_SEQUENCES=true")
 
-        print_counts(connection)
+    #Resumen final
+    with engine.connect() as conn:
+        print_counts(conn)
 
 
 if __name__ == "__main__":

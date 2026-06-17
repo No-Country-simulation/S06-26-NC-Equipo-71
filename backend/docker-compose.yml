@@ -10,6 +10,11 @@ services:
       - "5432:5432"
     volumes:
       - appbit_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d appbit_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   visent-loader:
     build:
@@ -17,7 +22,9 @@ services:
       dockerfile: Dockerfile.visent-loader
     container_name: appbit_visent_loader
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+    restart: on-failure
     environment:
       DB_HOST: postgres
       DB_PORT: 5432
