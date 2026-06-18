@@ -12,6 +12,7 @@ import com.appbit.backend.modules.auth.exception.EmailAlreadyExistsException;
 import com.appbit.backend.modules.auth.exception.InvalidCredentialsException;
 import com.appbit.backend.modules.auth.mapper.UserMapper;
 import com.appbit.backend.modules.auth.service.AuthService;
+import com.appbit.backend.modules.auth.service.JwtService;
 import com.appbit.backend.modules.user.EnumRole;
 import com.appbit.backend.modules.user.UserEntity;
 import com.appbit.backend.modules.user.UserRepository;
@@ -24,6 +25,7 @@ public class AuthServiceImpl implements AuthService {
 
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
+    private final JwtService jwtService;
 
     @Transactional
     @Override
@@ -55,8 +57,9 @@ public class AuthServiceImpl implements AuthService {
             throw new InvalidCredentialsException();
         }
 
+        String token = jwtService.generateToken(user);
         return AuthResponse.builder()
-                .token("jwt-token-aqui")
+                .token(token)
                 .build();
     }
 
