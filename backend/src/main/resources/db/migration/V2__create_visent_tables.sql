@@ -33,7 +33,7 @@ CREATE TABLE subscribers (
                              id BIGSERIAL PRIMARY KEY,
                              assinante_hash VARCHAR(64) NOT NULL UNIQUE,
                              home_cluster_id BIGINT NOT NULL,
-                             income_cluster CHAR(1) NOT NULL,
+                             income_cluster VARCHAR(1) NOT NULL,
                              age_group VARCHAR(10) NOT NULL,
                              mobility_pattern VARCHAR(20) NOT NULL,
                              flag_flagship BOOLEAN NOT NULL,
